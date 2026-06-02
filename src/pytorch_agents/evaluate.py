@@ -1,11 +1,3 @@
-"""
-Evaluation script — loads a trained checkpoint and reports detailed metrics.
-
-Usage::
-
-    python -m pytorch_agents.evaluate
-    python -m pytorch_agents.evaluate --checkpoint src/pytorch_agents/checkpoints/best.pt
-"""
 
 from __future__ import annotations
 
@@ -30,17 +22,9 @@ from pytorch_agents.train import _train_chartist, _train_newsroom
 
 
 def evaluate(cfg: dict, checkpoint_path: str):
-    """Load a checkpoint and evaluate on the validation split."""
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Re-create the sklearn models
-    print(" Re-training Chartist (RF) for evaluation wrapper...")
-    rf_model = _train_chartist(cfg)
-    print(" Re-training Newsroom (SVM) for evaluation wrapper...")
-    svm_model, vectorizer = _train_newsroom(cfg)
-
-    # Load data
     tech_df = pd.read_csv(
         PROJECT_ROOT / cfg["paths"]["technical_data"],
         index_col=0, parse_dates=True,
@@ -51,10 +35,22 @@ def evaluate(cfg: dict, checkpoint_path: str):
     seq_len = cfg["temporal"]["seq_len"]
     label_cfg = cfg["labels"]
 
-    # Use the same split as training
-    split_idx = int(len(tech_df) * (1 - cfg["training"]["val_split"]))
-    train_tech = tech_df.iloc[:split_idx]
-    val_tech = tech_df.iloc[split_idx - seq_len:]
+    train_dfs = []
+    val_dfs = []
+
+    groups = tech_df.groupby("Company") if "Company" in tech_df.columns else [(None, tech_df)]
+    for comp, grp in groups:
+        split_idx = int(len(grp) * (1 - cfg["training"]["val_split"]))
+        train_dfs.append(grp.iloc[:split_idx])
+        val_dfs.append(grp.iloc[split_idx - seq_len:])
+
+    train_tech = pd.concat(train_dfs)
+    val_tech = pd.concat(val_dfs)
+
+    print(" Re-training Chartist (RF) for evaluation wrapper...")
+    rf_model = _train_chartist(train_tech, cfg)
+    print(" Re-training Newsroom (SVM) for evaluation wrapper...")
+    svm_model, vectorizer = _train_newsroom(cfg)
 
     train_ds = StockDataset(
         train_tech, news_df, features, seq_len=seq_len, label_cfg=label_cfg,
@@ -69,7 +65,6 @@ def evaluate(cfg: dict, checkpoint_path: str):
         shuffle=False, collate_fn=collate_fn,
     )
 
-    # Build model & load weights
     model = EnsembleModel(rf_model, svm_model, vectorizer, cfg).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -78,7 +73,6 @@ def evaluate(cfg: dict, checkpoint_path: str):
     print(f"\n Loaded checkpoint from epoch {ckpt['epoch']} "
           f"(val_loss={ckpt['val_loss']:.4f}, val_acc={ckpt['val_acc']:.3f})")
 
-    # Predict
     all_preds = []
     all_labels = []
     all_attn = []
@@ -97,19 +91,17 @@ def evaluate(cfg: dict, checkpoint_path: str):
 
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
-    all_attn = np.concatenate(all_attn, axis=0)  # [N, 1, 3]
+    all_attn = np.concatenate(all_attn, axis=0)
 
-    # --- Classification Report ---
     target_names = [INV_CLASS_MAP[i] for i in range(3)]
     print("\n" + "=" * 60)
     print("CLASSIFICATION REPORT")
     print("=" * 60)
     print(classification_report(all_labels, all_preds, target_names=target_names))
 
-    # --- Confusion Matrix ---
     cm = confusion_matrix(all_labels, all_preds)
     cm_pct = cm.astype(float) / cm.sum(axis=1)[:, np.newaxis]
-    
+
     cm_formatted = []
     for i in range(cm.shape[0]):
         row = []
@@ -126,14 +118,13 @@ def evaluate(cfg: dict, checkpoint_path: str):
     total_preds = len(all_labels)
     print(f"\nOVERALL ACCURACY: {correct_preds} / {total_preds} ({correct_preds/total_preds:.1%})")
 
-    # --- Attention Weight Analysis ---
-    avg_attn = all_attn.squeeze(1).mean(axis=0)  # [3]
+    avg_attn = all_attn.squeeze(1).mean(axis=0)
     agent_names = ["Chartist", "Newsroom", "Oracle"]
     print("\n" + "-" * 40)
     print("AVERAGE CROSS-ATTENTION WEIGHTS")
     print("-" * 40)
     for name, weight in zip(agent_names, avg_attn):
-        bar = "█" * int(weight * 40)
+        bar = "#" * int(weight * 40)
         print(f"  {name:>10s}:  {weight:.3f}  {bar}")
 
     return all_preds, all_labels, all_attn

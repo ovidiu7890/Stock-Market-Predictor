@@ -1,11 +1,3 @@
-"""
-Prediction script — runs the full ensemble on live / new data.
-
-Usage::
-
-    python -m pytorch_agents.predict
-    python -m pytorch_agents.predict --headline "Apple posts record quarterly revenue"
-"""
 
 from __future__ import annotations
 
@@ -33,32 +25,23 @@ def predict(
     checkpoint_path: str,
     headline: str | None = None,
 ):
-    """
-    Run inference using the latest live data.
-
-    If ``headline`` is provided, it overrides the aligned news text.
-    """
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Re-create the sklearn models
     print(" Loading Chartist (RF)...")
     rf_model = _train_chartist(cfg)
     print(" Loading Newsroom (SVM)...")
     svm_model, vectorizer = _train_newsroom(cfg)
 
-    # Build model & load checkpoint
     model = EnsembleModel(rf_model, svm_model, vectorizer, cfg).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     print(f" Loaded checkpoint (epoch {ckpt['epoch']})")
 
-    # --- Build the sliding window from prepared + live data ---
     features = cfg["chartist"]["feature_columns"]
     seq_len = cfg["temporal"]["seq_len"]
 
-    # Combine prepared (for history) and live (for latest snapshot)
     tech_prepared = pd.read_csv(
         PROJECT_ROOT / cfg["paths"]["technical_data"],
         index_col=0, parse_dates=True,
@@ -67,13 +50,11 @@ def predict(
         PROJECT_ROOT / cfg["paths"]["technical_live"],
         index_col=0, parse_dates=True,
     )
-    # Use the tail of prepared + live to form the window
     combined = pd.concat([tech_prepared, tech_live]).tail(seq_len)
 
     if len(combined) < seq_len:
         print(f"  Only {len(combined)} rows available, need {seq_len}. "
               "Using what we have.")
-        # Pad with first row repeated
         pad_count = seq_len - len(combined)
         padding = pd.DataFrame(
             [combined.iloc[0]] * pad_count,
@@ -85,20 +66,16 @@ def predict(
         )
         combined = pd.concat([padding, combined])
 
-    # Scale
     scaler = fit_scaler(tech_prepared, features)
-    window = combined[features].values[-seq_len:]       # [seq_len, n_features]
-    window_scaled = scaler.transform(window)             # [seq_len, n_features]
+    window = combined[features].values[-seq_len:]
+    window_scaled = scaler.transform(window)
     window_tensor = torch.tensor(
         window_scaled, dtype=torch.float32
-    ).unsqueeze(0).to(device)                            # [1, seq_len, n_features]
+    ).unsqueeze(0).to(device)
 
-    # Raw snapshot for RF
-    snapshot_np = combined[features].values[-1:].astype(np.float32)  # [1, n_features]
+    snapshot_np = combined[features].values[-1:].astype(np.float32)
 
-    # Text
     if headline is None:
-        # Use the most recent article from the news dataset
         news_df = pd.read_csv(PROJECT_ROOT / cfg["paths"]["news_data"])
         news_df = news_df.dropna(subset=["Article"])
         news_df["Full_Text"] = (
@@ -108,16 +85,14 @@ def predict(
     else:
         text = headline
 
-    # --- Predict ---
     with torch.no_grad():
         logits, attn_weights = model(window_tensor, snapshot_np, [text])
 
-    probs = F.softmax(logits, dim=1).cpu().numpy()[0]       # [3]
+    probs = F.softmax(logits, dim=1).cpu().numpy()[0]
     pred_class = int(logits.argmax(dim=1).item())
     pred_label = INV_CLASS_MAP[pred_class]
-    attn = attn_weights.cpu().numpy().squeeze()              # [3]
+    attn = attn_weights.cpu().numpy().squeeze()
 
-    # --- Display results ---
     print("\n" + "=" * 60)
     print("    MULTI-AGENT ENSEMBLE PREDICTION")
     print("=" * 60)

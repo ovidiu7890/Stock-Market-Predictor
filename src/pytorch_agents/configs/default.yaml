@@ -1,0 +1,64 @@
+# ============================================================
+# Multi-Agent Cross-Attention Stock Market Predictor
+# Default Hyperparameter Configuration
+# ============================================================
+
+# --- Model Architecture ---
+model:
+  d_model: 64                 # Shared embedding dimension for all agents
+  n_heads: 4                  # Number of attention heads in cross-attention
+  dropout: 0.4                # Dropout in attention & FFN layers
+  head_dropout: 0.5           # Dropout in the classification head
+
+# --- Temporal Agent (GRU) ---
+temporal:
+  n_features: 9               # Input features per timestep (OHLCV + indicators)
+  seq_len: 30                 # Sliding window length (trading days)
+  hidden_size: 32             # GRU hidden size (bidirectional → 2 × 32 = 64 = d_model)
+  num_layers: 2               # Number of stacked GRU layers
+  dropout: 0.4                # GRU inter-layer dropout
+
+# --- Chartist Wrapper (Random Forest) ---
+chartist:
+  n_tree_features: 32         # Number of individual tree predictions to keep
+  feature_columns:            # Must match the columns used in technical_agent.ipynb
+    - Open
+    - High
+    - Low
+    - Close
+    - Volume
+    - SMA_10
+    - SMA_50
+    - Volatility
+    - RSI
+
+# --- Sentiment Wrapper (SVM) ---
+sentiment:
+  top_k_tfidf: 30             # Top-k TF-IDF activation values to extract
+
+# --- Label Generation ---
+labels:
+  strategy: "percentile"      # "percentile" or "fixed"
+  # For percentile strategy:
+  buy_percentile: 67           # Top 33% of returns → Buy
+  sell_percentile: 33          # Bottom 33% of returns → Sell
+  # For fixed strategy (only used when strategy == "fixed"):
+  buy_threshold: 0.01          # Return > 1% → Buy
+  sell_threshold: -0.01        # Return < -1% → Sell
+
+# --- Training ---
+training:
+  batch_size: 32
+  epochs: 100
+  learning_rate: 0.0003        # 3e-4
+  weight_decay: 0.01           # 1e-2 (Increased for stronger regularization)
+  patience: 15                 # Early stopping patience
+  val_split: 0.2               # Validation fraction (time-ordered, no shuffle)
+  seed: 42
+
+# --- Data Paths (relative to project root) ---
+paths:
+  technical_data: "csv-history/technical_data_prepared.csv"
+  technical_live: "csv-history/technical_data_live.csv"
+  news_data: "csv-history/perfectly_balanced_stock_news_labeled.csv"
+  checkpoint_dir: "src/pytorch_agents/checkpoints"
